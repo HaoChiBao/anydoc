@@ -34,9 +34,10 @@ pub enum Format {
     Odt,
     /// Converted with [pdf-inspector], which emits Markdown directly:
     /// [`to_document`] is unsupported for PDFs. Use [`to_markdown`],
-    /// [`to_markdown_bytes`], or [`to_markdown_pages`]. Scanned/image-only
-    /// PDFs (needing OCR) error as unsupported from the single-blob APIs;
-    /// [`to_markdown_pages`] reports OCR needs per page instead.
+    /// [`to_markdown_bytes`], or [`to_markdown_pages`]. Scanned or image-only
+    /// pages need OCR, which anydoc does not do: the single-blob APIs error
+    /// with [`ConvertError::NeedsOcr`] naming them; [`to_markdown_pages`]
+    /// reports OCR needs per page instead.
     ///
     /// [pdf-inspector]: https://github.com/firecrawl/pdf-inspector
     Pdf,
@@ -48,8 +49,8 @@ pub enum Format {
     Rtf,
     /// EPUB 2 and 3 (`.epub`).
     Epub,
-    /// Excel workbooks in every container calamine reads: `.xlsx`, `.xlsm`,
-    /// `.xlsb`, and binary `.xls`.
+    /// Excel workbooks: `.xlsx`, `.xlsm`, binary `.xlsb`, and legacy
+    /// OLE-based `.xls`.
     Excel,
     /// OpenDocument Spreadsheet (`.ods`).
     Ods,

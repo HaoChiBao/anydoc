@@ -1,13 +1,12 @@
 //! PDF via [pdf-inspector]: classification plus direct Markdown extraction.
 //!
 //! Unlike the other frontends, pdf-inspector emits Markdown itself, so PDFs
-//! bypass the document model and the shared GFM writer. Scanned and
-//! image-only PDFs need OCR, which is out of scope here; they error as
-//! unsupported from [`to_markdown`]. Per-page extraction via
+//! bypass the document model and the shared GFM writer. OCR is out of scope
+//! here: a document with scanned or image-only pages errors naming them from
+//! [`to_markdown`], whether that is every page or one of a hundred, because
+//! output missing those pages would read as complete. Per-page extraction via
 //! [`to_markdown_pages`] surfaces OCR needs on each page instead, so callers
-//! can route those pages elsewhere. Pages flagged for OCR in an otherwise
-//! text-based document degrade with a log from [`to_markdown`], consistent
-//! with the crate-wide recovery policy.
+//! can route those pages elsewhere.
 //!
 //! [pdf-inspector]: https://github.com/firecrawl/pdf-inspector
 
@@ -33,11 +32,15 @@ pub struct MarkdownPage {
 pub fn to_markdown(bytes: &[u8]) -> Result<String, ConvertError> {
     let result = pdf_inspector::process_pdf_mem(bytes).map_err(map_error)?;
     if !result.pages_needing_ocr.is_empty() {
-        log::warn!(
-            "{} of {} pages need OCR and were not extracted",
-            result.pages_needing_ocr.len(),
-            result.page_count
-        );
+        // Detection samples content streams and over-reports short or
+        // image-heavy text pages; extraction knows which of them yielded none.
+        let flagged: Vec<u32> = result.pages_needing_ocr.iter().map(|page| page - 1).collect();
+        let pages = pdf_inspector::extract_pages_markdown_mem(bytes, Some(&flagged))
+            .map_err(map_error)?
+            .pages_needing_ocr;
+        if !pages.is_empty() {
+            return Err(ConvertError::NeedsOcr { pages, page_count: result.page_count });
+        }
     }
     if result.has_encoding_issues {
         log::warn!("broken font encodings detected; extracted text may be garbled");
@@ -50,7 +53,7 @@ pub fn to_markdown(bytes: &[u8]) -> Result<String, ConvertError> {
             Ok(markdown)
         }
         _ => Err(ConvertError::Unsupported(format!(
-            "PDF has no extractable text ({:?}, {} pages): OCR is required",
+            "PDF has no extractable text ({:?}, {} pages)",
             result.pdf_type, result.page_count
         ))),
     }
@@ -98,32 +101,34 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    fn text_pdf() -> Vec<u8> {
+    fn mixed_pdf() -> Vec<u8> {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests")
             .join("fixtures")
             .join("pdf")
-            .join("text.pdf");
+            .join("handmade-mixed.pdf");
         std::fs::read(path).expect("pdf fixture")
     }
 
     #[test]
-    fn to_markdown_pages_returns_at_least_one_page() {
-        let pages = to_markdown_pages(&text_pdf()).expect("extract pages");
-        assert!(!pages.is_empty(), "expected at least one page");
+    fn to_markdown_pages_returns_per_page_ocr_flags() {
+        let pages = to_markdown_pages(&mixed_pdf()).expect("extract pages");
+        assert_eq!(pages.len(), 2);
         for (i, page) in pages.iter().enumerate() {
             assert_eq!(page.page, i as u32);
-            assert!(
-                page.needs_ocr || !page.markdown.trim().is_empty(),
-                "page {} should have markdown or need OCR",
-                page.page
-            );
         }
+        assert!(!pages[0].needs_ocr);
+        assert!(!pages[0].markdown.trim().is_empty());
+        assert!(pages[1].needs_ocr);
     }
 
     #[test]
-    fn to_markdown_still_returns_a_single_blob() {
-        let markdown = to_markdown(&text_pdf()).expect("extract markdown");
-        assert!(!markdown.trim().is_empty());
+    fn to_markdown_names_pages_that_need_ocr() {
+        match to_markdown(&mixed_pdf()) {
+            Err(ConvertError::NeedsOcr { pages, page_count }) => {
+                assert_eq!((pages, page_count), (vec![2], 2));
+            }
+            other => panic!("expected NeedsOcr, got {other:?}"),
+        }
     }
 }
