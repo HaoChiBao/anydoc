@@ -37,19 +37,28 @@ Options:
                          ${FORMATS}
                          (extension aliases like xls, docm, ppsx resolve
                          to these). Not valid with --batch.
+  --ocr <mode>           What to do with a PDF whose pages need OCR:
+                         reject (default) exits 3; hosted sends the
+                         document to Firecrawl Parse
+  --api-key <key>        Firecrawl API key for --ocr hosted, else
+                         FIRECRAWL_API_KEY, else keyless
+  --api-url <url>        Firecrawl API URL for --ocr hosted, else
+                         FIRECRAWL_API_URL, else https://api.firecrawl.dev
   -h, --help             Print this help and exit
   -V, --version          Print the version and exit
 
 The format is detected from the file content; the file extension is the
 fallback for signature-less formats (CSV). stdin has no extension, so CSV
-input from stdin needs --format csv. Scanned or image-only PDFs need OCR,
-which anydoc does not do, and error as unsupported.
+input from stdin needs --format csv. Scanned or image-only pages need OCR,
+which anydoc does not do: the document exits 3, or goes to Firecrawl Parse
+with --ocr hosted.
 
 Exit codes:
   0  success
   1  the document could not be read or converted (in batch mode: at least
      one file failed to convert)
   2  usage error: unknown option, missing input, or invalid --format
+  3  pages of a PDF need OCR
 
 Examples:
   anydoc report.docx
@@ -57,10 +66,14 @@ Examples:
   anydoc --batch ./docs -o ./out
   anydoc - --format csv < data.csv
   curl -s https://example.com/paper.pdf | anydoc -
+  anydoc scan.pdf --ocr hosted
 `
+
+const OCR_MODES = ['reject', 'hosted']
 
 const USAGE_ERROR = 2
 const CONVERSION_ERROR = 1
+const NEEDS_OCR = 3
 
 function fail(code, message) {
   process.stderr.write(`anydoc: ${message}\n`)
@@ -68,7 +81,7 @@ function fail(code, message) {
 }
 
 function parseArgs(argv) {
-  const args = { input: null, output: null, format: null, batch: false }
+  const args = { input: null, output: null, format: null, batch: false, ocr: null, apiKey: null, apiUrl: null }
   let positionalOnly = false
   for (let i = 0; i < argv.length; i++) {
     let arg = argv[i]
@@ -127,6 +140,18 @@ function parseArgs(argv) {
       case '-f':
       case '--format':
         args.format = value()
+        break
+      case '--ocr':
+        args.ocr = value()
+        if (!OCR_MODES.includes(args.ocr)) {
+          fail(USAGE_ERROR, `invalid --ocr '${args.ocr}'; expected one of: ${OCR_MODES.join(', ')}`)
+        }
+        break
+      case '--api-key':
+        args.apiKey = value()
+        break
+      case '--api-url':
+        args.apiUrl = value()
         break
       default:
         fail(USAGE_ERROR, `unknown option '${arg}' (see anydoc --help)`)
@@ -217,8 +242,9 @@ async function runBatch(args, { formatFromPath, toMarkdown }) {
     }
 
     const outPath = join(outputRoot, `${rel}.md`)
+    const options = { ocr: args.ocr ?? undefined, apiKey: args.apiKey ?? undefined, apiUrl: args.apiUrl ?? undefined }
     try {
-      const markdown = await toMarkdown(absPath)
+      const markdown = await toMarkdown(absPath, options)
       await mkdir(dirname(outPath), { recursive: true })
       await writeFile(outPath, markdown)
     } catch (error) {
@@ -241,17 +267,18 @@ async function runSingle(args, { formatFromExtension, toMarkdown, toMarkdownByte
     }
   }
 
+  const options = { ocr: args.ocr ?? undefined, apiKey: args.apiKey ?? undefined, apiUrl: args.apiUrl ?? undefined }
   let markdown
   try {
     if (args.input === '-') {
-      markdown = await toMarkdownBytes(await readStdin(), format)
+      markdown = await toMarkdownBytes(await readStdin(), format, options)
     } else if (format !== undefined) {
-      markdown = await toMarkdownBytes(await readFile(args.input), format)
+      markdown = await toMarkdownBytes(await readFile(args.input), format, options)
     } else {
-      markdown = await toMarkdown(args.input)
+      markdown = await toMarkdown(args.input, options)
     }
   } catch (error) {
-    fail(CONVERSION_ERROR, error.message)
+    fail(error.code === 'needsOcr' ? NEEDS_OCR : CONVERSION_ERROR, error.message)
   }
 
   if (args.output !== null) {
@@ -283,7 +310,7 @@ async function main() {
 
   // Loaded after argument handling so --help and --version work even where
   // no native binding is available.
-  const bindings = require('./index.js')
+  const bindings = require('./anydoc.js')
 
   if (args.batch) {
     await runBatch(args, bindings)
